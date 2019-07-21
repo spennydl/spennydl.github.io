@@ -2,71 +2,71 @@
 <urlset xmlns="https://www.sitemaps.org/schemas/sitemap/0.9/sitemap.xsd">
     
         <url>
-            <loc>https%3A//example.com/</loc>
+            <loc>https%3A//spennydl.github.io/</loc>
             
         </url>
     
         <url>
-            <loc>https%3A//example.com/about/me/</loc>
+            <loc>https%3A//spennydl.github.io/about/me/</loc>
             
                 <lastmod>2019-07-20</lastmod>
             
         </url>
     
         <url>
-            <loc>https%3A//example.com/bottoms-up-wasm/</loc>
+            <loc>https%3A//spennydl.github.io/bottoms-up-wasm/</loc>
             
                 <lastmod>2019-07-20</lastmod>
             
         </url>
     
         <url>
-            <loc>https%3A//example.com/categories/</loc>
+            <loc>https%3A//spennydl.github.io/categories/</loc>
             
         </url>
     
         <url>
-            <loc>https%3A//example.com/categories/coding/</loc>
+            <loc>https%3A//spennydl.github.io/categories/coding/</loc>
             
         </url>
     
         <url>
-            <loc>https%3A//example.com/categories/coding/page/1/</loc>
+            <loc>https%3A//spennydl.github.io/categories/coding/page/1/</loc>
             
         </url>
     
         <url>
-            <loc>https%3A//example.com/categories/guides/</loc>
+            <loc>https%3A//spennydl.github.io/categories/guides/</loc>
             
         </url>
     
         <url>
-            <loc>https%3A//example.com/categories/guides/page/1/</loc>
+            <loc>https%3A//spennydl.github.io/categories/guides/page/1/</loc>
             
         </url>
     
         <url>
-            <loc>https%3A//example.com/tags/</loc>
+            <loc>https%3A//spennydl.github.io/tags/</loc>
             
         </url>
     
         <url>
-            <loc>https%3A//example.com/tags/rust/</loc>
+            <loc>https%3A//spennydl.github.io/tags/rust/</loc>
             
         </url>
     
         <url>
-            <loc>https%3A//example.com/tags/rust/page/1/</loc>
+            <loc>https%3A//spennydl.github.io/tags/rust/page/1/</loc>
             
         </url>
     
         <url>
-            <loc>https%3A//example.com/tags/wasm/</loc>
+            <loc>https%3A//spennydl.github.io/tags/wasm/</loc>
             
         </url>
     
         <url>
-            <loc>https%3A//example.com/tags/wasm/page/1/</loc>
+            <loc>https%3A//spennydl.github.io/tags/wasm/page/1/</loc>
             
         </url>
     

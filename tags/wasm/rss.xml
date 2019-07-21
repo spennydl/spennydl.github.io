@@ -2,18 +2,18 @@
 <rss xmlns:atom="http://www.w3.org/2005/Atom" version="2.0">
     <channel>
         <title>the dl</title>
-        <link>https%3A//example.com</link>
+        <link>https%3A//spennydl.github.io</link>
         <description>a blog by spencer leslie</description>
         <generator>Zola</generator>
         <language>en</language>
-        <atom:link href="https%3A//example.com/tags/wasm/rss.xml" rel="self" type="application/rss+xml"/>
+        <atom:link href="https%3A//spennydl.github.io/tags/wasm/rss.xml" rel="self" type="application/rss+xml"/>
         <lastBuildDate>Sat, 20 Jul 2019 00:00:00 +0000</lastBuildDate>
         
             <item>
                 <title>A Bottoms-up Guide to WASM with Rust - Part 1</title>
                 <pubDate>Sat, 20 Jul 2019 00:00:00 +0000</pubDate>
-                <link>https%3A//example.com/bottoms-up-wasm/</link>
-                <guid>https%3A//example.com/bottoms-up-wasm/</guid>
+                <link>https%3A//spennydl.github.io/bottoms-up-wasm/</link>
+                <guid>https%3A//spennydl.github.io/bottoms-up-wasm/</guid>
                 <description>&lt;p&gt;Recently, I&#x27;ve been working with WebAssembly using Rust.  There is a &lt;em&gt;fantastic&lt;&#x2F;em&gt; ecosystem in Rust for
 running code in the browser using tools like &lt;code&gt;wasm-bindgen&lt;&#x2F;code&gt; and &lt;code&gt;web-sys&lt;&#x2F;code&gt; to provide abstractions
 over the FFI and bindings for JavaScript APIs.  While these tools are great and &lt;em&gt;you should use them&lt;&#x2F;em&gt;, 
@@ -53,7 +53,7 @@ should try as best you can to minimize copying data across the boundary.  Instea
 objects live in the WASM side and return a smaller, easily copied result when computations are complete.&lt;&#x2F;p&gt;
 &lt;h1 id=&quot;let-s-code&quot;&gt;Let&#x27;s code!&lt;&#x2F;h1&gt;
 &lt;blockquote&gt;
-&lt;p&gt;All examples presented here can be found in the &lt;a href=&quot;https:&#x2F;&#x2F;example.com&#x2F;bottoms-up-wasm&#x2F;example-repo&quot;&gt;git repo&lt;&#x2F;a&gt; for this post.
+&lt;p&gt;All examples presented here can be found in the &lt;a href=&quot;https:&#x2F;&#x2F;spennydl.github.io&#x2F;bottoms-up-wasm&#x2F;example-repo&quot;&gt;git repo&lt;&#x2F;a&gt; for this post.
 The doc comments in the presented examples give paths to the file within this repo.&lt;&#x2F;p&gt;
 &lt;&#x2F;blockquote&gt;
 &lt;h2 id=&quot;project-setup&quot;&gt;Project Setup&lt;&#x2F;h2&gt;
