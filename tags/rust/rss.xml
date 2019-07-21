@@ -7,11 +7,11 @@
         <generator>Zola</generator>
         <language>en</language>
         <atom:link href="https%3A//example.com/tags/rust/rss.xml" rel="self" type="application/rss+xml"/>
-        <lastBuildDate>Sat, 01 Jun 2019 00:00:00 +0000</lastBuildDate>
+        <lastBuildDate>Sat, 20 Jul 2019 00:00:00 +0000</lastBuildDate>
         
             <item>
                 <title>A Bottoms-up Guide to WASM with Rust - Part 1</title>
-                <pubDate>Sat, 01 Jun 2019 00:00:00 +0000</pubDate>
+                <pubDate>Sat, 20 Jul 2019 00:00:00 +0000</pubDate>
                 <link>https%3A//example.com/bottoms-up-wasm/</link>
                 <guid>https%3A//example.com/bottoms-up-wasm/</guid>
                 <description>&lt;p&gt;Recently, I&#x27;ve been working with WebAssembly using Rust.  There is a &lt;em&gt;fantastic&lt;&#x2F;em&gt; ecosystem in Rust for
