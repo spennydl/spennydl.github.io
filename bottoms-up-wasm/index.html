@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+      <meta http-equiv="X-UA-Compatible" content="IE=edge">
+      <meta http-equiv="content-type" content="text/html; charset=utf-8">
+
+      <!-- Enable responsiveness on mobile devices-->
+      <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+
+      <title>the dl</title>
+
+      <!-- css -->
+      <link rel="stylesheet" href="/reset.css">
+      <link rel="stylesheet" href="/feather.css">
+
+      <!-- fonts -->
+      <link href="https://fonts.googleapis.com/css?family=Merriweather:300,400|Waiting+for+the+Sunrise:400,700|Fira+Mono:500" rel="stylesheet">
+
+      <!-- js -->
+      <script src='/js/images.js'></script>
+      <script src='/js/main.js'></script>
+      <script src="https://identity.netlify.com/v1/netlify-identity-widget.js"></script>
+
+      
+
+      
+
+      
+      
+    </head>
+
+    <body>
+
+    <a href="/">
+      
+        
+      
+      <div class='header-image' style='background-image: url(&#x2F;herocmp.png);'></div>
+    </a>
+
+    
+<div class='container'>
+  <section class="post">
+  	<div class="title-and-info">
+    	<h2>A Bottoms-up Guide to WASM with Rust - Part 1</h2>
+    	<div class="info">
+    		<span>14 minute read</span>
+    		
+    			<span class='divider'/>
+    			<span>01 June 2019</span>
+    		
+    		
+    		
+    	</div>
+    </div>
+  	<article>
+  		<p>Recently, I've been working with WebAssembly using Rust.  There is a <em>fantastic</em> ecosystem in Rust for
+running code in the browser using tools like <code>wasm-bindgen</code> and <code>web-sys</code> to provide abstractions
+over the FFI and bindings for JavaScript APIs.  While these tools are great and <em>you should use them</em>, 
+it's also critically important to understand how the WASM/JS interface works and where the boundaries and
+bottlenecks are in order to design performant and correct applications.</p>
+<p>With that goal in mind, today we're setting out on a multi-part guide to build up this understanding by building some
+simple WASM projects from the bottom up.  In part 1 (this post!) we'll deal with doing things the hard way: 
+we'll be writing pure Rust and JS without any helper libraries, instead passing the data we need back and forth manually.
+In the next part, we'll layer <code>wasm-bindgen</code> and <code>web-sys</code> on to what we've built to solve some of the problems we identify in this exercise.</p>
+<blockquote>
+<p>Quick disclaimer: Part 1 of this guide presents interfacing WebAssembly and JavaScript in a way that you
+probably don't want to do for any serious projects.</p>
+<p>If you're just looking for a quick-start with WebAssembly and Rust,
+check back in a few weeks for part two, or check out the awesome <a href="https://rustwasm.github.io/docs/book/">Rust and WebAssembly book</a></p>
+</blockquote>
+<h1 id="webassembly-and-javascript">WebAssembly and JavaScript</h1>
+<p>Before we get on to hacking on some code, we'll need to take a quick look at WebAssembly and JavaScript to get the lay
+of the land.  I promise it will go quick.</p>
+<p>I have good news for some, bad news for other: WebAssembly does not entirely replace JavaScript, nor was it designed
+with that goal in mind.  Instead, it should be thought of as a low-level counterpart to higher-level JavaScript.  This also
+means that interoperating between the two has a few... extra considerations.</p>
+<p>When you load your compiled WASM in a browser, it gets loaded as an ES2015 module and, as such, exports a number of functions
+that JS can call into.  Likewise, it can import JS functions and call them directly.  However, the two sides don't get 
+access to all the same memory.  JS runs as normal with a fully managed heap, and WASM gets a linear array of bytes to do with as it sees
+fit.  WASM has <em>no visibility</em> into the JS heap, and no access to native objects (at least the time
+of this writing; <a href="https://github.com/WebAssembly/webidl-bindings/blob/master/proposals/webidl-bindings/Explainer.md">this proposal</a> 
+attempts to address this limitation).
+Furthermore, you're limited to being able to pass only <em>primitive numerical types</em>
+to functions that WASM exports <em>and</em> to JS functions that WASM imports.</p>
+<p><img src="/bottoms-up-wasm/wasmjs.png" alt="wasm-js-boundary" /></p>
+<p>From the JavaScript side, however, you have full read-write access to WASM's linear array of memory.  This means you can serialize and
+write complex objects into the memory to be picked up by WASM, or you can read out large objects after they've been worked on by your
+WASM module.  Coordinating this effort, however, is up to you.</p>
+<p>In practice, this boundary will influence most design decisions that need to be made when constructing an application.  Copying large
+objects into and out of the WASM linear memory and serializing/deserializing them is expensive; to avoid incurring this overhead, you
+should try as best you can to minimize copying data across the boundary.  Instead, it's generally preferable to have larger, longer-lived
+objects live in the WASM side and return a smaller, easily copied result when computations are complete.</p>
+<h1 id="let-s-code">Let's code!</h1>
+<blockquote>
+<p>All examples presented here can be found in the <a href="https://example.com/bottoms-up-wasm/example-repo">git repo</a> for this post.
+The doc comments in the presented examples give paths to the file within this repo.</p>
+</blockquote>
+<h2 id="project-setup">Project Setup</h2>
+<p>Now that that's out of the way, let's move on to building something!  In this post, we'll be working through a fairly standard Hello World.
+We should now set up the project.  Open up your terminal and create a new library crate wherever you see fit:</p>
+<pre style="background-color:#212121;">
+<span style="color:#82aaff;">$ cargo new my-wasm-project
+</span></pre>
+<p>We need to let the rust compiler know we intend our project to be used as a library that interfaces with an external FFI and that
+it should not include rust-specific stuff in the final code.
+To do so, add this to your new crate's <code>Cargo.toml</code>:</p>
+<pre style="background-color:#212121;">
+<span style="color:#89ddff;">[lib]
+</span><span style="color:#f07178;">crate-type </span><span style="color:#89ddff;">= [&quot;</span><span style="color:#c3e88d;">cdylib</span><span style="color:#89ddff;">&quot;, &quot;</span><span style="color:#c3e88d;">rlib</span><span style="color:#89ddff;">&quot;]
+</span></pre>
+<p>We need to be able to serve the built webassembly module, an HTML page, and the JavaScript that runs everything,
+so create a <code>/public</code> directory within the project and create an <code>index.html</code> page and a <code>load_wasm.js</code> script.
+Your project should look like the following:</p>
+<pre style="background-color:#212121;">
+<span style="color:#eeffff;">my-wasm-project/
+    src/
+        lib.rs
+    public/
+        index.html
+        load_wasm.js
+    Cargo.toml
+</span></pre>
+<p>At this point, you should figure out a way to serve the contents of the <code>public/</code> directory that works for you.  If you have python installed
+on your system, you can serve everything in <code>public/</code> by running this handy one-liner from within the directory:</p>
+<pre style="background-color:#212121;">
+<span style="color:#82aaff;">$ python</span><span style="color:#89ddff;"> -</span><span style="color:#f78c6c;">m</span><span style="color:#82aaff;"> http.server 8080
+</span></pre>
+<p>Once the <code>http.server</code> module loads, you can get to <code>index.html</code> by opening <code>http://localhost:8080/</code> in your browser.</p>
+<h2 id="a-naive-and-broken-hello-world">A Naive (and broken) Hello World</h2>
+<p>We'll be building build the quintessential browser Hello World: our project will display an alert to the user when the page loads.
+Later, we'll enable JavaScript to pass a name to our WebAssembly module, and WebAssembly will greet the user by name.</p>
+<p>To accomplish this, we'll have to do the following:</p>
+<ol>
+<li>Let the Rust compiler know we want to import the <code>alert</code> function from JS.</li>
+<li>Export a function from Rust that calls the <code>alert</code> function with our greeting.</li>
+<li>Load the module from JS and call the exported function.</li>
+</ol>
+<p>To start, open up <code>src/lib.rs</code> and add this (naive) code:</p>
+<pre style="background-color:#212121;">
+<span style="font-style:italic;color:#4a4a4a;">//! part1-broken-alert/src/lib.rs
+
+/// Pull in the alert function.
+</span><span style="color:#c792ea;">extern </span><span style="color:#89ddff;">{
+    </span><span style="font-style:italic;color:#4a4a4a;">/// Alert from JS.
+    </span><span style="font-style:italic;color:#c792ea;">fn </span><span style="color:#82aaff;">alert</span><span style="color:#89ddff;">(</span><span style="color:#f78c6c;">s</span><span style="color:#89ddff;">: </span><span style="color:#c792ea;">*const </span><span style="font-style:italic;color:#c792ea;">u8</span><span style="color:#89ddff;">);
+}
+
+</span><span style="font-style:italic;color:#4a4a4a;">/// Greet the user with an alert message.
+</span><span style="color:#89ddff;">#[</span><span style="color:#eeffff;">no_mangle</span><span style="color:#89ddff;">]
+</span><span style="color:#c792ea;">pub extern </span><span style="font-style:italic;color:#c792ea;">fn </span><span style="color:#82aaff;">greet</span><span style="color:#89ddff;">() {
+    </span><span style="font-style:italic;color:#c792ea;">let</span><span style="color:#eeffff;"> message </span><span style="color:#89ddff;">= </span><span style="color:#ffcb6b;">String</span><span style="color:#89ddff;">::</span><span style="color:#eeffff;">from</span><span style="color:#89ddff;">(&quot;</span><span style="color:#c3e88d;">hullo werld</span><span style="color:#89ddff;">&quot;);
+    </span><span style="font-style:italic;color:#4a4a4a;">// call the alert function
+    </span><span style="color:#c792ea;">unsafe </span><span style="color:#89ddff;">{ </span><span style="color:#82aaff;">alert</span><span style="color:#89ddff;">(</span><span style="color:#eeffff;">message</span><span style="color:#89ddff;">.</span><span style="color:#82aaff;">as_ptr</span><span style="color:#89ddff;">()) };
+}
+</span></pre>
+<p>Let's look at what this is doing:</p>
+<ul>
+<li>Let the compiler know we want to import a function called <code>alert</code> that takes a pointer-to-u8.</li>
+<li>Define our <code>greet</code> function that JS will call.  Note that for it to be exported properly from our module, we need
+to decare it <code>extern</code> and annotate it with <code>#[no_mangle]</code> so the compiler uses the correct calling convention.</li>
+<li>Call <code>alert</code>.  We're calling an <code>extern</code> function, so this is an unsafe operation.</li>
+</ul>
+<p>This covers items 1 and 2 on our list, now to wire up the JavaScript side.  Open up <code>public/load_wasm.js</code> and drop in this code:</p>
+<pre style="background-color:#212121;">
+<span style="font-style:italic;color:#4a4a4a;">// part1-broken-alert/public/load_wasm.js
+</span><span style="color:#89ddff;">(</span><span style="font-style:italic;color:#c792ea;">function</span><span style="color:#89ddff;">() {
+
+    </span><span style="font-style:italic;color:#4a4a4a;">// Create an object to pass reference to imported functions to
+    // our wasm module.
+    </span><span style="font-style:italic;color:#c792ea;">var </span><span style="color:#eeffff;">import_obj </span><span style="color:#89ddff;">= {
+        </span><span style="color:#eeffff;">env</span><span style="color:#89ddff;">: {
+            </span><span style="color:#eeffff;">alert</span><span style="color:#89ddff;">: </span><span style="color:#eeffff;">alert</span><span style="color:#89ddff;">,
+        },
+    };
+
+    </span><span style="font-style:italic;color:#4a4a4a;">// Load the wasm module.
+    </span><span style="color:#82aaff;">fetch</span><span style="color:#89ddff;">(&#39;</span><span style="color:#c3e88d;">my_wasm_project.wasm</span><span style="color:#89ddff;">&#39;).</span><span style="color:#82aaff;">then</span><span style="color:#89ddff;">(</span><span style="color:#f78c6c;">response </span><span style="font-style:italic;color:#c792ea;">=&gt;
+      </span><span style="color:#eeffff;">response</span><span style="color:#89ddff;">.</span><span style="color:#82aaff;">arrayBuffer</span><span style="color:#89ddff;">()
+    ).</span><span style="color:#82aaff;">then</span><span style="color:#89ddff;">(</span><span style="color:#f78c6c;">bytes </span><span style="font-style:italic;color:#c792ea;">=&gt;
+      </span><span style="font-style:italic;color:#4a4a4a;">// Instantiate the wasm module
+      </span><span style="color:#ffcb6b;">WebAssembly</span><span style="color:#89ddff;">.</span><span style="color:#82aaff;">instantiate</span><span style="color:#89ddff;">(</span><span style="color:#eeffff;">bytes</span><span style="color:#89ddff;">, </span><span style="color:#eeffff;">import_obj</span><span style="color:#89ddff;">)
+    ).</span><span style="color:#82aaff;">then</span><span style="color:#89ddff;">(</span><span style="color:#f78c6c;">results </span><span style="font-style:italic;color:#c792ea;">=&gt; </span><span style="color:#89ddff;">{
+        </span><span style="font-style:italic;color:#c792ea;">let </span><span style="color:#eeffff;">wasm </span><span style="color:#89ddff;">= </span><span style="color:#eeffff;">results</span><span style="color:#89ddff;">.</span><span style="color:#82aaff;">instance</span><span style="color:#89ddff;">.</span><span style="color:#82aaff;">exports</span><span style="color:#89ddff;">;
+        </span><span style="font-style:italic;color:#4a4a4a;">// call greet!
+        </span><span style="color:#eeffff;">wasm</span><span style="color:#89ddff;">.</span><span style="color:#82aaff;">greet</span><span style="color:#89ddff;">();
+    });
+})();
+</span></pre>
+<p>The javascript code is fairly straight-forward: fetch the module, instantiate it, and call
+the exported function.  Easy!</p>
+<blockquote>
+<p>Note that we're fetching the wasm module and using the WebAssembly API's <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/WebAssembly/instantiate"><code>instantiate</code></a> function
+instead of the much more convenient <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/WebAssembly/instantiateStreaming"><code>instantiateStreaming</code></a> function.  <code>instantiateStreaming</code> enforces
+that the module you fetch has a mime type of <code>application/wasm</code>, however many webservers incorrectly
+interperet wasm modules as <code>application/octet-stream</code>.  Until web servers catch up, the presented
+approach may be more reliable.</p>
+</blockquote>
+<p>Finally, let's add some content to our <code>index.html</code> page:</p>
+<pre style="background-color:#212121;">
+<span style="color:#89ddff;">&lt;!</span><span style="color:#f07178;">DOCTYPE html</span><span style="color:#89ddff;">&gt;
+</span><span style="font-style:italic;color:#4a4a4a;">&lt;!-- part1-broken-alert/public/index.html --&gt;
+</span><span style="color:#89ddff;">&lt;</span><span style="color:#f07178;">html </span><span style="font-style:italic;color:#ffcb6b;">lang</span><span style="color:#89ddff;">=&quot;</span><span style="color:#c3e88d;">en</span><span style="color:#89ddff;">&quot;&gt;
+&lt;</span><span style="color:#f07178;">head</span><span style="color:#89ddff;">&gt;
+    &lt;</span><span style="color:#f07178;">meta </span><span style="font-style:italic;color:#ffcb6b;">charset</span><span style="color:#89ddff;">=&quot;</span><span style="color:#c3e88d;">UTF-8</span><span style="color:#89ddff;">&quot;&gt;
+    &lt;</span><span style="color:#f07178;">title</span><span style="color:#89ddff;">&gt;</span><span style="color:#eeffff;">Testing!!!</span><span style="color:#89ddff;">&lt;/</span><span style="color:#f07178;">title</span><span style="color:#89ddff;">&gt;
+&lt;/</span><span style="color:#f07178;">head</span><span style="color:#89ddff;">&gt;
+&lt;</span><span style="color:#f07178;">body</span><span style="color:#89ddff;">&gt;
+    &lt;</span><span style="color:#f07178;">script </span><span style="font-style:italic;color:#ffcb6b;">type</span><span style="color:#89ddff;">=&quot;</span><span style="color:#c3e88d;">text/javascript</span><span style="color:#89ddff;">&quot; </span><span style="font-style:italic;color:#ffcb6b;">src</span><span style="color:#89ddff;">=&quot;</span><span style="color:#c3e88d;">load_wasm.js</span><span style="color:#89ddff;">&quot; &gt;&lt;/</span><span style="color:#f07178;">script</span><span style="color:#89ddff;">&gt;
+&lt;/</span><span style="color:#f07178;">body</span><span style="color:#89ddff;">&gt;
+&lt;/</span><span style="color:#f07178;">html</span><span style="color:#89ddff;">&gt;
+</span></pre>
+<p>Let's run it!  We need to build the project, copy the module into our <code>public/</code> folder, and serve it:</p>
+<pre style="background-color:#212121;">
+<span style="color:#82aaff;">$ cargo build</span><span style="color:#89ddff;"> --</span><span style="color:#f78c6c;">target</span><span style="color:#89ddff;">=</span><span style="color:#82aaff;">wasm32-unknown-unknown
+$ cp target/wasm32-unknown-unknown/debug/my_wasm_project.wasm public/
+$ cd public
+$ python</span><span style="color:#89ddff;"> -</span><span style="color:#f78c6c;">m</span><span style="color:#82aaff;"> http.server 8080
+</span></pre>
+<p>Eagle-eyed readers will have noticed that there is a problem with the above code, and that it won't do
+what we're expecting.  If you haven't spotted it yet, take a minute to read through and see if you can figure it out!</p>
+<p>When I run the code on my system, I get this:</p>
+<p><img src="/bottoms-up-wasm/broken-alert.png" alt="broken-alert-example" /></p>
+<p>Huh.  Doesn't really look right, does it?
+Recall a few things about interfacing with WASM modules:</p>
+<ul>
+<li>We can only pass primitive numeric types as arguments or return values</li>
+<li>Objects allocated by WASM are referenced by pointers that are (effectively) indexes into WASM's linear memory</li>
+</ul>
+<p>It stands to reason here that we've just alerted the user with the <em>index of the string</em> in WASM's memory, and <em>not the string itself!</em></p>
+<h2 id="a-working-hello-world">A Working Hello World</h2>
+<p>In order for JS to get the string, we'll have to change a few steps of our program.  Here's the revised version:</p>
+<ol>
+<li>From the WASM side, export a <code>greet</code> function that will create a string and pass a pointer to an imported JS function.</li>
+<li>From the JS side, extract the string from the WASM memory referenced by the returned pointer.</li>
+<li>From the JS side, call <code>alert</code> with the extrated string</li>
+</ol>
+<p>The new Rust code becomes:</p>
+<pre style="background-color:#212121;">
+<span style="font-style:italic;color:#4a4a4a;">//! part1-working-alert/src/lib.rs
+
+</span><span style="color:#c792ea;">extern </span><span style="color:#89ddff;">{
+    </span><span style="font-style:italic;color:#4a4a4a;">/// Import a function that accepts a pointer to the string
+    /// _and_ its length.
+    </span><span style="font-style:italic;color:#c792ea;">fn </span><span style="color:#82aaff;">alert</span><span style="color:#89ddff;">(</span><span style="color:#f78c6c;">ptr</span><span style="color:#89ddff;">: </span><span style="color:#c792ea;">*const </span><span style="font-style:italic;color:#c792ea;">u8</span><span style="color:#eeffff;">, </span><span style="color:#f78c6c;">len</span><span style="color:#89ddff;">: </span><span style="font-style:italic;color:#c792ea;">usize</span><span style="color:#89ddff;">);
+}
+
+</span><span style="font-style:italic;color:#4a4a4a;">/// Greet function.
+</span><span style="color:#89ddff;">#[</span><span style="color:#eeffff;">no_mangle</span><span style="color:#89ddff;">]
+</span><span style="color:#c792ea;">pub extern </span><span style="font-style:italic;color:#c792ea;">fn </span><span style="color:#82aaff;">greet</span><span style="color:#89ddff;">() {
+    </span><span style="font-style:italic;color:#c792ea;">let</span><span style="color:#eeffff;"> message </span><span style="color:#89ddff;">= </span><span style="color:#ffcb6b;">String</span><span style="color:#89ddff;">::</span><span style="color:#eeffff;">from</span><span style="color:#89ddff;">(&quot;</span><span style="color:#c3e88d;">hello werld</span><span style="color:#89ddff;">&quot;);
+    </span><span style="font-style:italic;color:#4a4a4a;">// Pass a pointer to the string as well as the length in bytes.
+    </span><span style="color:#c792ea;">unsafe </span><span style="color:#89ddff;">{ </span><span style="color:#82aaff;">alert</span><span style="color:#89ddff;">(</span><span style="color:#eeffff;">message</span><span style="color:#89ddff;">.</span><span style="color:#82aaff;">as_ptr</span><span style="color:#89ddff;">(),</span><span style="color:#eeffff;"> message</span><span style="color:#89ddff;">.</span><span style="color:#82aaff;">len</span><span style="color:#89ddff;">()) };
+}
+</span></pre>
+<p>Nice!  This didn't have to change much.  The only extra information the JS side needs is
+the length of the string <em>in bytes</em> (we're dealing with unicode strings, so the number of bytes does <em>not</em> correspond to the number of printable characters)</p>
+<p>Things do get a bit more complicated on the JS side, however:</p>
+<pre style="background-color:#212121;">
+<span style="font-style:italic;color:#4a4a4a;">// part1-working-alert/public/load_wasm.js
+</span><span style="color:#89ddff;">(</span><span style="font-style:italic;color:#c792ea;">function</span><span style="color:#89ddff;">() {
+    </span><span style="font-style:italic;color:#c792ea;">var </span><span style="color:#eeffff;">wasm</span><span style="color:#89ddff;">;
+
+    </span><span style="font-style:italic;color:#4a4a4a;">// Takes a pointer to a string and length,
+    // decodes the string and calls alert(str).
+    </span><span style="font-style:italic;color:#c792ea;">function </span><span style="color:#82aaff;">__alert</span><span style="color:#89ddff;">(</span><span style="color:#f78c6c;">ptr</span><span style="color:#89ddff;">, </span><span style="color:#f78c6c;">len</span><span style="color:#89ddff;">) {
+        </span><span style="font-style:italic;color:#4a4a4a;">// Pull the raw data out of wasm memory.
+        </span><span style="font-style:italic;color:#c792ea;">let </span><span style="color:#eeffff;">mem </span><span style="color:#89ddff;">= new </span><span style="color:#eeffff;">Uint8Array</span><span style="color:#89ddff;">(</span><span style="color:#eeffff;">wasm</span><span style="color:#89ddff;">.</span><span style="color:#82aaff;">memory</span><span style="color:#89ddff;">.</span><span style="color:#82aaff;">buffer</span><span style="color:#89ddff;">);
+        </span><span style="font-style:italic;color:#c792ea;">let </span><span style="color:#eeffff;">slice </span><span style="color:#89ddff;">= </span><span style="color:#eeffff;">mem</span><span style="color:#89ddff;">.</span><span style="color:#82aaff;">subarray</span><span style="color:#89ddff;">(</span><span style="color:#eeffff;">ptr</span><span style="color:#89ddff;">, </span><span style="color:#eeffff;">ptr </span><span style="color:#89ddff;">+ </span><span style="color:#eeffff;">len</span><span style="color:#89ddff;">);
+
+        </span><span style="font-style:italic;color:#4a4a4a;">// Decode the string.
+        </span><span style="font-style:italic;color:#c792ea;">let </span><span style="color:#eeffff;">decoder </span><span style="color:#89ddff;">= new </span><span style="color:#eeffff;">TextDecoder</span><span style="color:#89ddff;">(&#39;</span><span style="color:#c3e88d;">utf-8</span><span style="color:#89ddff;">&#39;);
+        </span><span style="font-style:italic;color:#c792ea;">let </span><span style="color:#eeffff;">str </span><span style="color:#89ddff;">= </span><span style="color:#eeffff;">decoder</span><span style="color:#89ddff;">.</span><span style="color:#82aaff;">decode</span><span style="color:#89ddff;">(</span><span style="color:#eeffff;">slice</span><span style="color:#89ddff;">);
+
+        </span><span style="font-style:italic;color:#4a4a4a;">// Call alert!
+        </span><span style="color:#82aaff;">alert</span><span style="color:#89ddff;">(</span><span style="color:#eeffff;">str</span><span style="color:#89ddff;">);
+    }
+
+    </span><span style="font-style:italic;color:#4a4a4a;">// import object to pass to our wasm module.
+    </span><span style="font-style:italic;color:#c792ea;">var </span><span style="color:#eeffff;">import_obj </span><span style="color:#89ddff;">= {
+        </span><span style="color:#eeffff;">env</span><span style="color:#89ddff;">: {
+            </span><span style="color:#eeffff;">alert</span><span style="color:#89ddff;">: </span><span style="color:#eeffff;">__alert</span><span style="color:#89ddff;">,
+        },
+    };
+
+    </span><span style="font-style:italic;color:#4a4a4a;">// fetch the wasm module, instantiate it, and
+    // call our greet function.
+    </span><span style="color:#82aaff;">fetch</span><span style="color:#89ddff;">(&#39;</span><span style="color:#c3e88d;">part1_working_alert.wasm</span><span style="color:#89ddff;">&#39;).</span><span style="color:#82aaff;">then</span><span style="color:#89ddff;">(</span><span style="color:#f78c6c;">response </span><span style="font-style:italic;color:#c792ea;">=&gt;
+      </span><span style="color:#eeffff;">response</span><span style="color:#89ddff;">.</span><span style="color:#82aaff;">arrayBuffer</span><span style="color:#89ddff;">()
+    ).</span><span style="color:#82aaff;">then</span><span style="color:#89ddff;">(</span><span style="color:#f78c6c;">bytes </span><span style="font-style:italic;color:#c792ea;">=&gt;
+      </span><span style="color:#ffcb6b;">WebAssembly</span><span style="color:#89ddff;">.</span><span style="color:#82aaff;">instantiate</span><span style="color:#89ddff;">(</span><span style="color:#eeffff;">bytes</span><span style="color:#89ddff;">, </span><span style="color:#eeffff;">import_obj</span><span style="color:#89ddff;">)
+    ).</span><span style="color:#82aaff;">then</span><span style="color:#89ddff;">(</span><span style="color:#f78c6c;">results </span><span style="font-style:italic;color:#c792ea;">=&gt; </span><span style="color:#89ddff;">{
+        </span><span style="color:#eeffff;">wasm </span><span style="color:#89ddff;">= </span><span style="color:#eeffff;">results</span><span style="color:#89ddff;">.</span><span style="color:#82aaff;">instance</span><span style="color:#89ddff;">.</span><span style="color:#82aaff;">exports</span><span style="color:#89ddff;">;
+        </span><span style="color:#eeffff;">wasm</span><span style="color:#89ddff;">.</span><span style="color:#82aaff;">greet</span><span style="color:#89ddff;">();
+    });
+})();
+</span></pre>
+<p>To handle retrieving the data from WASM's memory, we've added a shim function called <code>__alert</code> between
+the WASM module and the <code>alert</code> call.  Its job is to fetch and decode the UTF-8 string from the WASM module's
+memory, and call <code>alert</code> with it.</p>
+<p>Running the updated example should give you this:</p>
+<p><img src="/bottoms-up-wasm/working-alert.png" alt="working-alert" /></p>
+<p>Huzzah!  It works!</p>
+<p>Hopefully this is starting to give you a good idea of what passing data and calling functions
+across the wasm/js boundary looks like.  Next, we'll follow this example through the next logical
+iteration: greeting someone by name.</p>
+<h2 id="to-wasm-and-back-again">To WASM and Back Again</h2>
+<p>We want to greet someone by name, and we want that name to be passed to our WASM module from JavaScript.
+Recall that JavaScript has full read-write access to the WASM memory.  With that in mind, the task ahead
+of us should look something like this:</p>
+<ol>
+<li>From Javascript, write a string to <em>some place</em> in the WASM memory and note the index.</li>
+<li>From Javascript, pass the index and length to the WASM module.</li>
+<li>From WASM, construct a string from the passed-in pointer and length.</li>
+<li>From WASM, construct a string <code>Hello, {name}</code> and call <code>alert</code> as before.</li>
+</ol>
+<p>Seems simple, right?  But look at the first item on the list.  The obvious question is: where are we going
+to write the string to?  How does the JavaScript side know what memory is unused, and how can we ensure that
+the memory we use gets cleaned up properly?</p>
+<p>To do this properly, we need to expose some mechanism from our WASM module to allow JavaScript to allocate memory.
+This makes the WASM side aware of the allocated memory and allows us to manage it properly.</p>
+<p>Let's do that!  Here's the function, and the changes to <code>greet</code>:</p>
+<pre style="background-color:#212121;">
+<span style="font-style:italic;color:#4a4a4a;">//! part1-custom-alert/src/lib.rs
+</span><span style="color:#c792ea;">use </span><span style="color:#eeffff;">std</span><span style="color:#89ddff;">::</span><span style="color:#eeffff;">alloc</span><span style="color:#89ddff;">::</span><span style="color:#eeffff;">Layout</span><span style="color:#89ddff;">;
+</span><span style="color:#c792ea;">use </span><span style="color:#eeffff;">std</span><span style="color:#89ddff;">::</span><span style="color:#eeffff;">alloc</span><span style="color:#89ddff;">::</span><span style="color:#eeffff;">alloc</span><span style="color:#89ddff;">;
+
+</span><span style="font-style:italic;color:#4a4a4a;">/// Allocate memory for javascript to use.
+</span><span style="color:#89ddff;">#[</span><span style="color:#eeffff;">no_mangle</span><span style="color:#89ddff;">]
+</span><span style="color:#c792ea;">pub extern </span><span style="font-style:italic;color:#c792ea;">fn </span><span style="color:#82aaff;">do_alloc</span><span style="color:#89ddff;">(</span><span style="color:#f78c6c;">num_bytes</span><span style="color:#89ddff;">: </span><span style="font-style:italic;color:#c792ea;">usize</span><span style="color:#89ddff;">) -&gt; </span><span style="color:#c792ea;">*const </span><span style="font-style:italic;color:#c792ea;">u8 </span><span style="color:#89ddff;">{
+    </span><span style="font-style:italic;color:#4a4a4a;">// Create a layout for the memory.
+    </span><span style="font-style:italic;color:#c792ea;">let</span><span style="color:#eeffff;"> layout </span><span style="color:#89ddff;">= </span><span style="color:#eeffff;">Layout</span><span style="color:#89ddff;">::</span><span style="color:#eeffff;">from_size_align</span><span style="color:#89ddff;">(</span><span style="color:#eeffff;">num_bytes</span><span style="color:#89ddff;">, </span><span style="color:#eeffff;">std</span><span style="color:#89ddff;">::</span><span style="color:#eeffff;">mem</span><span style="color:#89ddff;">::</span><span style="color:#eeffff;">align_of</span><span style="color:#89ddff;">::&lt;</span><span style="font-style:italic;color:#c792ea;">u8</span><span style="color:#89ddff;">&gt;())
+        .</span><span style="color:#82aaff;">expect</span><span style="color:#89ddff;">(&quot;</span><span style="color:#c3e88d;">couldn&#39;t create a layout</span><span style="color:#89ddff;">&quot;);
+    </span><span style="font-style:italic;color:#4a4a4a;">// Do the alloc.
+    </span><span style="font-style:italic;color:#c792ea;">let</span><span style="color:#eeffff;"> ptr </span><span style="color:#89ddff;">= </span><span style="color:#c792ea;">unsafe </span><span style="color:#89ddff;">{ </span><span style="color:#82aaff;">alloc</span><span style="color:#89ddff;">(</span><span style="color:#eeffff;">layout</span><span style="color:#89ddff;">) };
+    </span><span style="font-style:italic;color:#4a4a4a;">// Return the pointer.
+</span><span style="color:#eeffff;">    ptr
+</span><span style="color:#89ddff;">}
+
+</span><span style="font-style:italic;color:#4a4a4a;">/// Export a `greet` function from Rust to JavaScript that takes
+/// a string and alerts &quot;Hello {name}!&quot;.
+</span><span style="color:#89ddff;">#[</span><span style="color:#eeffff;">no_mangle</span><span style="color:#89ddff;">]
+</span><span style="color:#c792ea;">pub extern </span><span style="font-style:italic;color:#c792ea;">fn </span><span style="color:#82aaff;">greet</span><span style="color:#89ddff;">(</span><span style="color:#f78c6c;">name_ptr</span><span style="color:#89ddff;">: </span><span style="color:#c792ea;">*mut </span><span style="font-style:italic;color:#c792ea;">u8</span><span style="color:#eeffff;">, </span><span style="color:#f78c6c;">len</span><span style="color:#89ddff;">: </span><span style="font-style:italic;color:#c792ea;">u8</span><span style="color:#89ddff;">) {
+    </span><span style="font-style:italic;color:#4a4a4a;">// Create a string around the raw name passed from javascript.
+    // Note that from_raw_parts takes ownership, ensuring the string will get dropped.
+    </span><span style="font-style:italic;color:#c792ea;">let</span><span style="color:#eeffff;"> name </span><span style="color:#89ddff;">= </span><span style="color:#c792ea;">unsafe </span><span style="color:#89ddff;">{ </span><span style="color:#ffcb6b;">String</span><span style="color:#89ddff;">::</span><span style="color:#eeffff;">from_raw_parts</span><span style="color:#89ddff;">(</span><span style="color:#eeffff;">name_ptr</span><span style="color:#89ddff;">,</span><span style="color:#eeffff;"> len </span><span style="color:#89ddff;">as </span><span style="font-style:italic;color:#c792ea;">usize</span><span style="color:#89ddff;">,</span><span style="color:#eeffff;"> len </span><span style="color:#89ddff;">as </span><span style="font-style:italic;color:#c792ea;">usize</span><span style="color:#89ddff;">) };
+    </span><span style="font-style:italic;color:#4a4a4a;">// Create our message.
+    </span><span style="font-style:italic;color:#c792ea;">let</span><span style="color:#eeffff;"> message </span><span style="color:#89ddff;">= </span><span style="color:#eeffff;">format!</span><span style="color:#89ddff;">(&quot;</span><span style="color:#c3e88d;">Hello </span><span style="color:#eeffff;">{}</span><span style="color:#c3e88d;">!</span><span style="color:#89ddff;">&quot;,</span><span style="color:#eeffff;"> name</span><span style="color:#89ddff;">);
+    </span><span style="font-style:italic;color:#4a4a4a;">//Call alert.
+    </span><span style="color:#c792ea;">unsafe </span><span style="color:#89ddff;">{
+        </span><span style="color:#82aaff;">alert</span><span style="color:#89ddff;">(</span><span style="color:#eeffff;">message</span><span style="color:#89ddff;">.</span><span style="color:#82aaff;">as_ptr</span><span style="color:#89ddff;">(),</span><span style="color:#eeffff;"> message</span><span style="color:#89ddff;">.</span><span style="color:#82aaff;">len</span><span style="color:#89ddff;">());
+    }
+    </span><span style="font-style:italic;color:#4a4a4a;">// The strings gets dropped here, and the memory cleaned up.
+</span><span style="color:#89ddff;">}
+</span></pre>
+<blockquote>
+<p>We're allocating memory using <code>alloc</code> because, at the time of writing, the <code>Alloc</code> trait has not yet been stabilized.</p>
+</blockquote>
+<p>The <code>do_alloc</code> function will allocate a given number of bytes in WASM's memory and return the index 
+to the caller.  We've also modified <code>greet</code> to accept a pointer and length to use to create a <code>String</code>, format the message,
+and call <code>alert</code> as before.</p>
+<p>We can wire this up with JavaScript like so:</p>
+<pre style="background-color:#212121;">
+<span style="font-style:italic;color:#4a4a4a;">// part1-custom-alert/public/load_wasm.js
+    // ...
+
+    // Passes the string to our wasm module and
+    // calls the exported greet function.
+    </span><span style="font-style:italic;color:#c792ea;">function </span><span style="color:#82aaff;">call_greet</span><span style="color:#89ddff;">(</span><span style="color:#f78c6c;">name</span><span style="color:#89ddff;">) {
+        </span><span style="font-style:italic;color:#4a4a4a;">// Encode the string as bytes.
+        </span><span style="font-style:italic;color:#c792ea;">let </span><span style="color:#eeffff;">encoder </span><span style="color:#89ddff;">= new </span><span style="color:#eeffff;">TextEncoder</span><span style="color:#89ddff;">(&#39;</span><span style="color:#c3e88d;">utf-8</span><span style="color:#89ddff;">&#39;)
+        </span><span style="font-style:italic;color:#c792ea;">let </span><span style="color:#eeffff;">encoded </span><span style="color:#89ddff;">= </span><span style="color:#eeffff;">encoder</span><span style="color:#89ddff;">.</span><span style="color:#82aaff;">encode</span><span style="color:#89ddff;">(</span><span style="color:#eeffff;">name</span><span style="color:#89ddff;">);
+
+        </span><span style="font-style:italic;color:#4a4a4a;">// Allocate some memory for our wasm module and set
+        // it to the encoded string.
+        </span><span style="font-style:italic;color:#c792ea;">let </span><span style="color:#eeffff;">ptr </span><span style="color:#89ddff;">= </span><span style="color:#eeffff;">wasm</span><span style="color:#89ddff;">.</span><span style="color:#82aaff;">do_alloc</span><span style="color:#89ddff;">(</span><span style="color:#eeffff;">encoded</span><span style="color:#89ddff;">.</span><span style="color:#82aaff;">length</span><span style="color:#89ddff;">);
+        </span><span style="font-style:italic;color:#c792ea;">let </span><span style="color:#eeffff;">mem </span><span style="color:#89ddff;">= new </span><span style="color:#eeffff;">Uint8Array</span><span style="color:#89ddff;">(</span><span style="color:#eeffff;">wasm</span><span style="color:#89ddff;">.</span><span style="color:#82aaff;">memory</span><span style="color:#89ddff;">.</span><span style="color:#82aaff;">buffer</span><span style="color:#89ddff;">, </span><span style="color:#eeffff;">ptr</span><span style="color:#89ddff;">);
+        </span><span style="color:#eeffff;">mem</span><span style="color:#89ddff;">.</span><span style="color:#82aaff;">set</span><span style="color:#89ddff;">(</span><span style="color:#eeffff;">encoded</span><span style="color:#89ddff;">);
+
+        </span><span style="font-style:italic;color:#4a4a4a;">// Call greet with the pointer and length.
+        </span><span style="color:#eeffff;">wasm</span><span style="color:#89ddff;">.</span><span style="color:#82aaff;">greet</span><span style="color:#89ddff;">(</span><span style="color:#eeffff;">ptr</span><span style="color:#89ddff;">, </span><span style="color:#eeffff;">encoded</span><span style="color:#89ddff;">.</span><span style="color:#82aaff;">length</span><span style="color:#89ddff;">);
+    }
+
+    </span><span style="font-style:italic;color:#4a4a4a;">// ...
+
+    // replace wasm.greet() with:
+        </span><span style="color:#82aaff;">call_greet</span><span style="color:#89ddff;">(&quot;</span><span style="color:#c3e88d;">nerd</span><span style="color:#89ddff;">&quot;);
+
+    </span><span style="font-style:italic;color:#4a4a4a;">// ...
+</span></pre>
+<p>Runing the new code, we get:</p>
+<p><img src="/bottoms-up-wasm/custom-alert.png" alt="custom-alert" /></p>
+<p>It works!</p>
+<h2 id="in-conclusion">In Conclusion</h2>
+<p>We've seen how we can work across the WASM/JavaScript boundary to get things done, but there
+are some obvious issues with this approach:</p>
+<ul>
+<li>We have to manage a lot memory ourselves.</li>
+<li>There's unsafe code all over the place.</li>
+<li>There's a <em>lot</em> of error-prone boilerplate dedicated to moving values across the boundary.</li>
+</ul>
+<p>Thankfully, this is where the excellent <code>wasm-bindgen</code> comes in to help out.  <code>wasm-bindgen</code> will
+generate code at compile time for us that takes care of everything we did manually here, and allows
+us to write Rust without comprimising the abstractions it gives us over memory management and lifetimes.</p>
+<p>In the next installment of this guide, we'll layer in <code>wasm-bindgen</code> and <code>web-sys</code>, which serves to give
+an abstraction over dealing with native JavaScript objects.  It'll be a hoot, so check back soon!</p>
+<p>If you're hungry for a more complex example of what we've been through today, the <a href="https://github.com/spennydl/wasm-tutorial-examples/">example repository</a> 
+for this post contains an extra project that computes a julia set and draws it directly from WASM's memory
+to an HTML canvas.  Take a look if you're interested!</p>
+<p>Thanks for reading!</p>
+
+  	</article>
+  </section>
+
+  
+
+</div>
+
+
+    <footer>
+      © <a href="/about/me">spencer leslie, 2019</a> &nbsp;&nbsp;|&nbsp;&nbsp; based on the Feather theme by <a href="https://github.com/piedoom/feather">doomy</a>&nbsp;&nbsp;|&nbsp;&nbsp; built with <a href="https://github.com/getzola/zola">zola</a>
+      
+    </footer>
+
+    </body>
+
+</html>

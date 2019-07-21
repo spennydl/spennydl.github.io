@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="https://www.sitemaps.org/schemas/sitemap/0.9/sitemap.xsd">
+    
+        <url>
+            <loc>https%3A//example.com/</loc>
+            
+        </url>
+    
+        <url>
+            <loc>https%3A//example.com/about/me/</loc>
+            
+                <lastmod>2019-06-01</lastmod>
+            
+        </url>
+    
+        <url>
+            <loc>https%3A//example.com/bottoms-up-wasm/</loc>
+            
+                <lastmod>2019-06-01</lastmod>
+            
+        </url>
+    
+        <url>
+            <loc>https%3A//example.com/categories/</loc>
+            
+        </url>
+    
+        <url>
+            <loc>https%3A//example.com/categories/coding/</loc>
+            
+        </url>
+    
+        <url>
+            <loc>https%3A//example.com/categories/coding/page/1/</loc>
+            
+        </url>
+    
+        <url>
+            <loc>https%3A//example.com/categories/guides/</loc>
+            
+        </url>
+    
+        <url>
+            <loc>https%3A//example.com/categories/guides/page/1/</loc>
+            
+        </url>
+    
+        <url>
+            <loc>https%3A//example.com/tags/</loc>
+            
+        </url>
+    
+        <url>
+            <loc>https%3A//example.com/tags/rust/</loc>
+            
+        </url>
+    
+        <url>
+            <loc>https%3A//example.com/tags/rust/page/1/</loc>
+            
+        </url>
+    
+        <url>
+            <loc>https%3A//example.com/tags/wasm/</loc>
+            
+        </url>
+    
+        <url>
+            <loc>https%3A//example.com/tags/wasm/page/1/</loc>
+            
+        </url>
+    
+</urlset>

@@ -1,0 +1,375 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss xmlns:atom="http://www.w3.org/2005/Atom" version="2.0">
+    <channel>
+        <title>the dl</title>
+        <link>https%3A//example.com</link>
+        <description>a blog by spencer leslie</description>
+        <generator>Zola</generator>
+        <language>en</language>
+        <atom:link href="https%3A//example.com/categories/coding/rss.xml" rel="self" type="application/rss+xml"/>
+        <lastBuildDate>Sat, 01 Jun 2019 00:00:00 +0000</lastBuildDate>
+        
+            <item>
+                <title>A Bottoms-up Guide to WASM with Rust - Part 1</title>
+                <pubDate>Sat, 01 Jun 2019 00:00:00 +0000</pubDate>
+                <link>https%3A//example.com/bottoms-up-wasm/</link>
+                <guid>https%3A//example.com/bottoms-up-wasm/</guid>
+                <description>&lt;p&gt;Recently, I&#x27;ve been working with WebAssembly using Rust.  There is a &lt;em&gt;fantastic&lt;&#x2F;em&gt; ecosystem in Rust for
+running code in the browser using tools like &lt;code&gt;wasm-bindgen&lt;&#x2F;code&gt; and &lt;code&gt;web-sys&lt;&#x2F;code&gt; to provide abstractions
+over the FFI and bindings for JavaScript APIs.  While these tools are great and &lt;em&gt;you should use them&lt;&#x2F;em&gt;, 
+it&#x27;s also critically important to understand how the WASM&#x2F;JS interface works and where the boundaries and
+bottlenecks are in order to design performant and correct applications.&lt;&#x2F;p&gt;
+&lt;p&gt;With that goal in mind, today we&#x27;re setting out on a multi-part guide to build up this understanding by building some
+simple WASM projects from the bottom up.  In part 1 (this post!) we&#x27;ll deal with doing things the hard way: 
+we&#x27;ll be writing pure Rust and JS without any helper libraries, instead passing the data we need back and forth manually.
+In the next part, we&#x27;ll layer &lt;code&gt;wasm-bindgen&lt;&#x2F;code&gt; and &lt;code&gt;web-sys&lt;&#x2F;code&gt; on to what we&#x27;ve built to solve some of the problems we identify in this exercise.&lt;&#x2F;p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;Quick disclaimer: Part 1 of this guide presents interfacing WebAssembly and JavaScript in a way that you
+probably don&#x27;t want to do for any serious projects.&lt;&#x2F;p&gt;
+&lt;p&gt;If you&#x27;re just looking for a quick-start with WebAssembly and Rust,
+check back in a few weeks for part two, or check out the awesome &lt;a href=&quot;https:&#x2F;&#x2F;rustwasm.github.io&#x2F;docs&#x2F;book&#x2F;&quot;&gt;Rust and WebAssembly book&lt;&#x2F;a&gt;&lt;&#x2F;p&gt;
+&lt;&#x2F;blockquote&gt;
+&lt;h1 id=&quot;webassembly-and-javascript&quot;&gt;WebAssembly and JavaScript&lt;&#x2F;h1&gt;
+&lt;p&gt;Before we get on to hacking on some code, we&#x27;ll need to take a quick look at WebAssembly and JavaScript to get the lay
+of the land.  I promise it will go quick.&lt;&#x2F;p&gt;
+&lt;p&gt;I have good news for some, bad news for other: WebAssembly does not entirely replace JavaScript, nor was it designed
+with that goal in mind.  Instead, it should be thought of as a low-level counterpart to higher-level JavaScript.  This also
+means that interoperating between the two has a few... extra considerations.&lt;&#x2F;p&gt;
+&lt;p&gt;When you load your compiled WASM in a browser, it gets loaded as an ES2015 module and, as such, exports a number of functions
+that JS can call into.  Likewise, it can import JS functions and call them directly.  However, the two sides don&#x27;t get 
+access to all the same memory.  JS runs as normal with a fully managed heap, and WASM gets a linear array of bytes to do with as it sees
+fit.  WASM has &lt;em&gt;no visibility&lt;&#x2F;em&gt; into the JS heap, and no access to native objects (at least the time
+of this writing; &lt;a href=&quot;https:&#x2F;&#x2F;github.com&#x2F;WebAssembly&#x2F;webidl-bindings&#x2F;blob&#x2F;master&#x2F;proposals&#x2F;webidl-bindings&#x2F;Explainer.md&quot;&gt;this proposal&lt;&#x2F;a&gt; 
+attempts to address this limitation).
+Furthermore, you&#x27;re limited to being able to pass only &lt;em&gt;primitive numerical types&lt;&#x2F;em&gt;
+to functions that WASM exports &lt;em&gt;and&lt;&#x2F;em&gt; to JS functions that WASM imports.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;img src=&quot;&#x2F;bottoms-up-wasm&#x2F;wasmjs.png&quot; alt=&quot;wasm-js-boundary&quot; &#x2F;&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;From the JavaScript side, however, you have full read-write access to WASM&#x27;s linear array of memory.  This means you can serialize and
+write complex objects into the memory to be picked up by WASM, or you can read out large objects after they&#x27;ve been worked on by your
+WASM module.  Coordinating this effort, however, is up to you.&lt;&#x2F;p&gt;
+&lt;p&gt;In practice, this boundary will influence most design decisions that need to be made when constructing an application.  Copying large
+objects into and out of the WASM linear memory and serializing&#x2F;deserializing them is expensive; to avoid incurring this overhead, you
+should try as best you can to minimize copying data across the boundary.  Instead, it&#x27;s generally preferable to have larger, longer-lived
+objects live in the WASM side and return a smaller, easily copied result when computations are complete.&lt;&#x2F;p&gt;
+&lt;h1 id=&quot;let-s-code&quot;&gt;Let&#x27;s code!&lt;&#x2F;h1&gt;
+&lt;blockquote&gt;
+&lt;p&gt;All examples presented here can be found in the &lt;a href=&quot;https:&#x2F;&#x2F;example.com&#x2F;bottoms-up-wasm&#x2F;example-repo&quot;&gt;git repo&lt;&#x2F;a&gt; for this post.
+The doc comments in the presented examples give paths to the file within this repo.&lt;&#x2F;p&gt;
+&lt;&#x2F;blockquote&gt;
+&lt;h2 id=&quot;project-setup&quot;&gt;Project Setup&lt;&#x2F;h2&gt;
+&lt;p&gt;Now that that&#x27;s out of the way, let&#x27;s move on to building something!  In this post, we&#x27;ll be working through a fairly standard Hello World.
+We should now set up the project.  Open up your terminal and create a new library crate wherever you see fit:&lt;&#x2F;p&gt;
+&lt;pre style=&quot;background-color:#212121;&quot;&gt;
+&lt;span style=&quot;color:#82aaff;&quot;&gt;$ cargo new my-wasm-project
+&lt;&#x2F;span&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;We need to let the rust compiler know we intend our project to be used as a library that interfaces with an external FFI and that
+it should not include rust-specific stuff in the final code.
+To do so, add this to your new crate&#x27;s &lt;code&gt;Cargo.toml&lt;&#x2F;code&gt;:&lt;&#x2F;p&gt;
+&lt;pre style=&quot;background-color:#212121;&quot;&gt;
+&lt;span style=&quot;color:#89ddff;&quot;&gt;[lib]
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#f07178;&quot;&gt;crate-type &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;= [&amp;quot;&lt;&#x2F;span&gt;&lt;span style=&quot;color:#c3e88d;&quot;&gt;cdylib&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;&amp;quot;, &amp;quot;&lt;&#x2F;span&gt;&lt;span style=&quot;color:#c3e88d;&quot;&gt;rlib&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;&amp;quot;]
+&lt;&#x2F;span&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;We need to be able to serve the built webassembly module, an HTML page, and the JavaScript that runs everything,
+so create a &lt;code&gt;&#x2F;public&lt;&#x2F;code&gt; directory within the project and create an &lt;code&gt;index.html&lt;&#x2F;code&gt; page and a &lt;code&gt;load_wasm.js&lt;&#x2F;code&gt; script.
+Your project should look like the following:&lt;&#x2F;p&gt;
+&lt;pre style=&quot;background-color:#212121;&quot;&gt;
+&lt;span style=&quot;color:#eeffff;&quot;&gt;my-wasm-project&#x2F;
+    src&#x2F;
+        lib.rs
+    public&#x2F;
+        index.html
+        load_wasm.js
+    Cargo.toml
+&lt;&#x2F;span&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;At this point, you should figure out a way to serve the contents of the &lt;code&gt;public&#x2F;&lt;&#x2F;code&gt; directory that works for you.  If you have python installed
+on your system, you can serve everything in &lt;code&gt;public&#x2F;&lt;&#x2F;code&gt; by running this handy one-liner from within the directory:&lt;&#x2F;p&gt;
+&lt;pre style=&quot;background-color:#212121;&quot;&gt;
+&lt;span style=&quot;color:#82aaff;&quot;&gt;$ python&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt; -&lt;&#x2F;span&gt;&lt;span style=&quot;color:#f78c6c;&quot;&gt;m&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt; http.server 8080
+&lt;&#x2F;span&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Once the &lt;code&gt;http.server&lt;&#x2F;code&gt; module loads, you can get to &lt;code&gt;index.html&lt;&#x2F;code&gt; by opening &lt;code&gt;http:&#x2F;&#x2F;localhost:8080&#x2F;&lt;&#x2F;code&gt; in your browser.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;a-naive-and-broken-hello-world&quot;&gt;A Naive (and broken) Hello World&lt;&#x2F;h2&gt;
+&lt;p&gt;We&#x27;ll be building build the quintessential browser Hello World: our project will display an alert to the user when the page loads.
+Later, we&#x27;ll enable JavaScript to pass a name to our WebAssembly module, and WebAssembly will greet the user by name.&lt;&#x2F;p&gt;
+&lt;p&gt;To accomplish this, we&#x27;ll have to do the following:&lt;&#x2F;p&gt;
+&lt;ol&gt;
+&lt;li&gt;Let the Rust compiler know we want to import the &lt;code&gt;alert&lt;&#x2F;code&gt; function from JS.&lt;&#x2F;li&gt;
+&lt;li&gt;Export a function from Rust that calls the &lt;code&gt;alert&lt;&#x2F;code&gt; function with our greeting.&lt;&#x2F;li&gt;
+&lt;li&gt;Load the module from JS and call the exported function.&lt;&#x2F;li&gt;
+&lt;&#x2F;ol&gt;
+&lt;p&gt;To start, open up &lt;code&gt;src&#x2F;lib.rs&lt;&#x2F;code&gt; and add this (naive) code:&lt;&#x2F;p&gt;
+&lt;pre style=&quot;background-color:#212121;&quot;&gt;
+&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F;! part1-broken-alert&#x2F;src&#x2F;lib.rs
+
+&#x2F;&#x2F;&#x2F; Pull in the alert function.
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#c792ea;&quot;&gt;extern &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;{
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F;&#x2F; Alert from JS.
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;fn &lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;alert&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#f78c6c;&quot;&gt;s&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;: &lt;&#x2F;span&gt;&lt;span style=&quot;color:#c792ea;&quot;&gt;*const &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;u8&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;);
+}
+
+&lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F;&#x2F; Greet the user with an alert message.
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;#[&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;no_mangle&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;]
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#c792ea;&quot;&gt;pub extern &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;fn &lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;greet&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;() {
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;let&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt; message &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;= &lt;&#x2F;span&gt;&lt;span style=&quot;color:#ffcb6b;&quot;&gt;String&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;::&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;from&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&amp;quot;&lt;&#x2F;span&gt;&lt;span style=&quot;color:#c3e88d;&quot;&gt;hullo werld&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;&amp;quot;);
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F; call the alert function
+    &lt;&#x2F;span&gt;&lt;span style=&quot;color:#c792ea;&quot;&gt;unsafe &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;{ &lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;alert&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;message&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;as_ptr&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;()) };
+}
+&lt;&#x2F;span&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Let&#x27;s look at what this is doing:&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;Let the compiler know we want to import a function called &lt;code&gt;alert&lt;&#x2F;code&gt; that takes a pointer-to-u8.&lt;&#x2F;li&gt;
+&lt;li&gt;Define our &lt;code&gt;greet&lt;&#x2F;code&gt; function that JS will call.  Note that for it to be exported properly from our module, we need
+to decare it &lt;code&gt;extern&lt;&#x2F;code&gt; and annotate it with &lt;code&gt;#[no_mangle]&lt;&#x2F;code&gt; so the compiler uses the correct calling convention.&lt;&#x2F;li&gt;
+&lt;li&gt;Call &lt;code&gt;alert&lt;&#x2F;code&gt;.  We&#x27;re calling an &lt;code&gt;extern&lt;&#x2F;code&gt; function, so this is an unsafe operation.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;This covers items 1 and 2 on our list, now to wire up the JavaScript side.  Open up &lt;code&gt;public&#x2F;load_wasm.js&lt;&#x2F;code&gt; and drop in this code:&lt;&#x2F;p&gt;
+&lt;pre style=&quot;background-color:#212121;&quot;&gt;
+&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F; part1-broken-alert&#x2F;public&#x2F;load_wasm.js
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;function&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;() {
+
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F; Create an object to pass reference to imported functions to
+    &#x2F;&#x2F; our wasm module.
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;var &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;import_obj &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;= {
+        &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;env&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;: {
+            &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;alert&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;: &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;alert&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;,
+        },
+    };
+
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F; Load the wasm module.
+    &lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;fetch&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&amp;#39;&lt;&#x2F;span&gt;&lt;span style=&quot;color:#c3e88d;&quot;&gt;my_wasm_project.wasm&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;&amp;#39;).&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;then&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#f78c6c;&quot;&gt;response &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;=&amp;gt;
+      &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;response&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;arrayBuffer&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;()
+    ).&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;then&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#f78c6c;&quot;&gt;bytes &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;=&amp;gt;
+      &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F; Instantiate the wasm module
+      &lt;&#x2F;span&gt;&lt;span style=&quot;color:#ffcb6b;&quot;&gt;WebAssembly&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;instantiate&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;bytes&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;, &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;import_obj&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;)
+    ).&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;then&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#f78c6c;&quot;&gt;results &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;=&amp;gt; &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;{
+        &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;let &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;wasm &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;= &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;results&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;instance&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;exports&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;;
+        &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F; call greet!
+        &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;wasm&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;greet&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;();
+    });
+})();
+&lt;&#x2F;span&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;The javascript code is fairly straight-forward: fetch the module, instantiate it, and call
+the exported function.  Easy!&lt;&#x2F;p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;Note that we&#x27;re fetching the wasm module and using the WebAssembly API&#x27;s &lt;a href=&quot;https:&#x2F;&#x2F;developer.mozilla.org&#x2F;en-US&#x2F;docs&#x2F;Web&#x2F;JavaScript&#x2F;Reference&#x2F;Global_Objects&#x2F;WebAssembly&#x2F;instantiate&quot;&gt;&lt;code&gt;instantiate&lt;&#x2F;code&gt;&lt;&#x2F;a&gt; function
+instead of the much more convenient &lt;a href=&quot;https:&#x2F;&#x2F;developer.mozilla.org&#x2F;en-US&#x2F;docs&#x2F;Web&#x2F;JavaScript&#x2F;Reference&#x2F;Global_Objects&#x2F;WebAssembly&#x2F;instantiateStreaming&quot;&gt;&lt;code&gt;instantiateStreaming&lt;&#x2F;code&gt;&lt;&#x2F;a&gt; function.  &lt;code&gt;instantiateStreaming&lt;&#x2F;code&gt; enforces
+that the module you fetch has a mime type of &lt;code&gt;application&#x2F;wasm&lt;&#x2F;code&gt;, however many webservers incorrectly
+interperet wasm modules as &lt;code&gt;application&#x2F;octet-stream&lt;&#x2F;code&gt;.  Until web servers catch up, the presented
+approach may be more reliable.&lt;&#x2F;p&gt;
+&lt;&#x2F;blockquote&gt;
+&lt;p&gt;Finally, let&#x27;s add some content to our &lt;code&gt;index.html&lt;&#x2F;code&gt; page:&lt;&#x2F;p&gt;
+&lt;pre style=&quot;background-color:#212121;&quot;&gt;
+&lt;span style=&quot;color:#89ddff;&quot;&gt;&amp;lt;!&lt;&#x2F;span&gt;&lt;span style=&quot;color:#f07178;&quot;&gt;DOCTYPE html&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;&amp;gt;
+&lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&amp;lt;!-- part1-broken-alert&#x2F;public&#x2F;index.html --&amp;gt;
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;&amp;lt;&lt;&#x2F;span&gt;&lt;span style=&quot;color:#f07178;&quot;&gt;html &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#ffcb6b;&quot;&gt;lang&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;=&amp;quot;&lt;&#x2F;span&gt;&lt;span style=&quot;color:#c3e88d;&quot;&gt;en&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;&amp;quot;&amp;gt;
+&amp;lt;&lt;&#x2F;span&gt;&lt;span style=&quot;color:#f07178;&quot;&gt;head&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;&amp;gt;
+    &amp;lt;&lt;&#x2F;span&gt;&lt;span style=&quot;color:#f07178;&quot;&gt;meta &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#ffcb6b;&quot;&gt;charset&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;=&amp;quot;&lt;&#x2F;span&gt;&lt;span style=&quot;color:#c3e88d;&quot;&gt;UTF-8&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;&amp;quot;&amp;gt;
+    &amp;lt;&lt;&#x2F;span&gt;&lt;span style=&quot;color:#f07178;&quot;&gt;title&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;&amp;gt;&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;Testing!!!&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;&amp;lt;&#x2F;&lt;&#x2F;span&gt;&lt;span style=&quot;color:#f07178;&quot;&gt;title&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;&amp;gt;
+&amp;lt;&#x2F;&lt;&#x2F;span&gt;&lt;span style=&quot;color:#f07178;&quot;&gt;head&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;&amp;gt;
+&amp;lt;&lt;&#x2F;span&gt;&lt;span style=&quot;color:#f07178;&quot;&gt;body&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;&amp;gt;
+    &amp;lt;&lt;&#x2F;span&gt;&lt;span style=&quot;color:#f07178;&quot;&gt;script &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#ffcb6b;&quot;&gt;type&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;=&amp;quot;&lt;&#x2F;span&gt;&lt;span style=&quot;color:#c3e88d;&quot;&gt;text&#x2F;javascript&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;&amp;quot; &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#ffcb6b;&quot;&gt;src&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;=&amp;quot;&lt;&#x2F;span&gt;&lt;span style=&quot;color:#c3e88d;&quot;&gt;load_wasm.js&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;&amp;quot; &amp;gt;&amp;lt;&#x2F;&lt;&#x2F;span&gt;&lt;span style=&quot;color:#f07178;&quot;&gt;script&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;&amp;gt;
+&amp;lt;&#x2F;&lt;&#x2F;span&gt;&lt;span style=&quot;color:#f07178;&quot;&gt;body&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;&amp;gt;
+&amp;lt;&#x2F;&lt;&#x2F;span&gt;&lt;span style=&quot;color:#f07178;&quot;&gt;html&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;&amp;gt;
+&lt;&#x2F;span&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Let&#x27;s run it!  We need to build the project, copy the module into our &lt;code&gt;public&#x2F;&lt;&#x2F;code&gt; folder, and serve it:&lt;&#x2F;p&gt;
+&lt;pre style=&quot;background-color:#212121;&quot;&gt;
+&lt;span style=&quot;color:#82aaff;&quot;&gt;$ cargo build&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt; --&lt;&#x2F;span&gt;&lt;span style=&quot;color:#f78c6c;&quot;&gt;target&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;=&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;wasm32-unknown-unknown
+$ cp target&#x2F;wasm32-unknown-unknown&#x2F;debug&#x2F;my_wasm_project.wasm public&#x2F;
+$ cd public
+$ python&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt; -&lt;&#x2F;span&gt;&lt;span style=&quot;color:#f78c6c;&quot;&gt;m&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt; http.server 8080
+&lt;&#x2F;span&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Eagle-eyed readers will have noticed that there is a problem with the above code, and that it won&#x27;t do
+what we&#x27;re expecting.  If you haven&#x27;t spotted it yet, take a minute to read through and see if you can figure it out!&lt;&#x2F;p&gt;
+&lt;p&gt;When I run the code on my system, I get this:&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;img src=&quot;&#x2F;bottoms-up-wasm&#x2F;broken-alert.png&quot; alt=&quot;broken-alert-example&quot; &#x2F;&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;Huh.  Doesn&#x27;t really look right, does it?
+Recall a few things about interfacing with WASM modules:&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;We can only pass primitive numeric types as arguments or return values&lt;&#x2F;li&gt;
+&lt;li&gt;Objects allocated by WASM are referenced by pointers that are (effectively) indexes into WASM&#x27;s linear memory&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;It stands to reason here that we&#x27;ve just alerted the user with the &lt;em&gt;index of the string&lt;&#x2F;em&gt; in WASM&#x27;s memory, and &lt;em&gt;not the string itself!&lt;&#x2F;em&gt;&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;a-working-hello-world&quot;&gt;A Working Hello World&lt;&#x2F;h2&gt;
+&lt;p&gt;In order for JS to get the string, we&#x27;ll have to change a few steps of our program.  Here&#x27;s the revised version:&lt;&#x2F;p&gt;
+&lt;ol&gt;
+&lt;li&gt;From the WASM side, export a &lt;code&gt;greet&lt;&#x2F;code&gt; function that will create a string and pass a pointer to an imported JS function.&lt;&#x2F;li&gt;
+&lt;li&gt;From the JS side, extract the string from the WASM memory referenced by the returned pointer.&lt;&#x2F;li&gt;
+&lt;li&gt;From the JS side, call &lt;code&gt;alert&lt;&#x2F;code&gt; with the extrated string&lt;&#x2F;li&gt;
+&lt;&#x2F;ol&gt;
+&lt;p&gt;The new Rust code becomes:&lt;&#x2F;p&gt;
+&lt;pre style=&quot;background-color:#212121;&quot;&gt;
+&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F;! part1-working-alert&#x2F;src&#x2F;lib.rs
+
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#c792ea;&quot;&gt;extern &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;{
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F;&#x2F; Import a function that accepts a pointer to the string
+    &#x2F;&#x2F;&#x2F; _and_ its length.
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;fn &lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;alert&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#f78c6c;&quot;&gt;ptr&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;: &lt;&#x2F;span&gt;&lt;span style=&quot;color:#c792ea;&quot;&gt;*const &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;u8&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;, &lt;&#x2F;span&gt;&lt;span style=&quot;color:#f78c6c;&quot;&gt;len&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;: &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;usize&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;);
+}
+
+&lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F;&#x2F; Greet function.
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;#[&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;no_mangle&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;]
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#c792ea;&quot;&gt;pub extern &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;fn &lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;greet&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;() {
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;let&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt; message &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;= &lt;&#x2F;span&gt;&lt;span style=&quot;color:#ffcb6b;&quot;&gt;String&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;::&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;from&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&amp;quot;&lt;&#x2F;span&gt;&lt;span style=&quot;color:#c3e88d;&quot;&gt;hello werld&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;&amp;quot;);
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F; Pass a pointer to the string as well as the length in bytes.
+    &lt;&#x2F;span&gt;&lt;span style=&quot;color:#c792ea;&quot;&gt;unsafe &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;{ &lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;alert&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;message&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;as_ptr&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(),&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt; message&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;len&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;()) };
+}
+&lt;&#x2F;span&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Nice!  This didn&#x27;t have to change much.  The only extra information the JS side needs is
+the length of the string &lt;em&gt;in bytes&lt;&#x2F;em&gt; (we&#x27;re dealing with unicode strings, so the number of bytes does &lt;em&gt;not&lt;&#x2F;em&gt; correspond to the number of printable characters)&lt;&#x2F;p&gt;
+&lt;p&gt;Things do get a bit more complicated on the JS side, however:&lt;&#x2F;p&gt;
+&lt;pre style=&quot;background-color:#212121;&quot;&gt;
+&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F; part1-working-alert&#x2F;public&#x2F;load_wasm.js
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;function&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;() {
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;var &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;wasm&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;;
+
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F; Takes a pointer to a string and length,
+    &#x2F;&#x2F; decodes the string and calls alert(str).
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;function &lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;__alert&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#f78c6c;&quot;&gt;ptr&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;, &lt;&#x2F;span&gt;&lt;span style=&quot;color:#f78c6c;&quot;&gt;len&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;) {
+        &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F; Pull the raw data out of wasm memory.
+        &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;let &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;mem &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;= new &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;Uint8Array&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;wasm&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;memory&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;buffer&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;);
+        &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;let &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;slice &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;= &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;mem&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;subarray&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;ptr&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;, &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;ptr &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;+ &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;len&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;);
+
+        &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F; Decode the string.
+        &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;let &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;decoder &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;= new &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;TextDecoder&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&amp;#39;&lt;&#x2F;span&gt;&lt;span style=&quot;color:#c3e88d;&quot;&gt;utf-8&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;&amp;#39;);
+        &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;let &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;str &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;= &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;decoder&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;decode&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;slice&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;);
+
+        &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F; Call alert!
+        &lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;alert&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;str&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;);
+    }
+
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F; import object to pass to our wasm module.
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;var &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;import_obj &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;= {
+        &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;env&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;: {
+            &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;alert&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;: &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;__alert&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;,
+        },
+    };
+
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F; fetch the wasm module, instantiate it, and
+    &#x2F;&#x2F; call our greet function.
+    &lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;fetch&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&amp;#39;&lt;&#x2F;span&gt;&lt;span style=&quot;color:#c3e88d;&quot;&gt;part1_working_alert.wasm&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;&amp;#39;).&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;then&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#f78c6c;&quot;&gt;response &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;=&amp;gt;
+      &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;response&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;arrayBuffer&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;()
+    ).&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;then&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#f78c6c;&quot;&gt;bytes &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;=&amp;gt;
+      &lt;&#x2F;span&gt;&lt;span style=&quot;color:#ffcb6b;&quot;&gt;WebAssembly&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;instantiate&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;bytes&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;, &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;import_obj&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;)
+    ).&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;then&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#f78c6c;&quot;&gt;results &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;=&amp;gt; &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;{
+        &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;wasm &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;= &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;results&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;instance&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;exports&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;;
+        &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;wasm&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;greet&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;();
+    });
+})();
+&lt;&#x2F;span&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;To handle retrieving the data from WASM&#x27;s memory, we&#x27;ve added a shim function called &lt;code&gt;__alert&lt;&#x2F;code&gt; between
+the WASM module and the &lt;code&gt;alert&lt;&#x2F;code&gt; call.  Its job is to fetch and decode the UTF-8 string from the WASM module&#x27;s
+memory, and call &lt;code&gt;alert&lt;&#x2F;code&gt; with it.&lt;&#x2F;p&gt;
+&lt;p&gt;Running the updated example should give you this:&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;img src=&quot;&#x2F;bottoms-up-wasm&#x2F;working-alert.png&quot; alt=&quot;working-alert&quot; &#x2F;&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;Huzzah!  It works!&lt;&#x2F;p&gt;
+&lt;p&gt;Hopefully this is starting to give you a good idea of what passing data and calling functions
+across the wasm&#x2F;js boundary looks like.  Next, we&#x27;ll follow this example through the next logical
+iteration: greeting someone by name.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;to-wasm-and-back-again&quot;&gt;To WASM and Back Again&lt;&#x2F;h2&gt;
+&lt;p&gt;We want to greet someone by name, and we want that name to be passed to our WASM module from JavaScript.
+Recall that JavaScript has full read-write access to the WASM memory.  With that in mind, the task ahead
+of us should look something like this:&lt;&#x2F;p&gt;
+&lt;ol&gt;
+&lt;li&gt;From Javascript, write a string to &lt;em&gt;some place&lt;&#x2F;em&gt; in the WASM memory and note the index.&lt;&#x2F;li&gt;
+&lt;li&gt;From Javascript, pass the index and length to the WASM module.&lt;&#x2F;li&gt;
+&lt;li&gt;From WASM, construct a string from the passed-in pointer and length.&lt;&#x2F;li&gt;
+&lt;li&gt;From WASM, construct a string &lt;code&gt;Hello, {name}&lt;&#x2F;code&gt; and call &lt;code&gt;alert&lt;&#x2F;code&gt; as before.&lt;&#x2F;li&gt;
+&lt;&#x2F;ol&gt;
+&lt;p&gt;Seems simple, right?  But look at the first item on the list.  The obvious question is: where are we going
+to write the string to?  How does the JavaScript side know what memory is unused, and how can we ensure that
+the memory we use gets cleaned up properly?&lt;&#x2F;p&gt;
+&lt;p&gt;To do this properly, we need to expose some mechanism from our WASM module to allow JavaScript to allocate memory.
+This makes the WASM side aware of the allocated memory and allows us to manage it properly.&lt;&#x2F;p&gt;
+&lt;p&gt;Let&#x27;s do that!  Here&#x27;s the function, and the changes to &lt;code&gt;greet&lt;&#x2F;code&gt;:&lt;&#x2F;p&gt;
+&lt;pre style=&quot;background-color:#212121;&quot;&gt;
+&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F;! part1-custom-alert&#x2F;src&#x2F;lib.rs
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#c792ea;&quot;&gt;use &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;std&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;::&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;alloc&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;::&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;Layout&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;;
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#c792ea;&quot;&gt;use &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;std&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;::&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;alloc&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;::&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;alloc&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;;
+
+&lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F;&#x2F; Allocate memory for javascript to use.
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;#[&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;no_mangle&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;]
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#c792ea;&quot;&gt;pub extern &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;fn &lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;do_alloc&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#f78c6c;&quot;&gt;num_bytes&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;: &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;usize&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;) -&amp;gt; &lt;&#x2F;span&gt;&lt;span style=&quot;color:#c792ea;&quot;&gt;*const &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;u8 &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;{
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F; Create a layout for the memory.
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;let&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt; layout &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;= &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;Layout&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;::&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;from_size_align&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;num_bytes&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;, &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;std&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;::&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;mem&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;::&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;align_of&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;::&amp;lt;&lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;u8&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;&amp;gt;())
+        .&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;expect&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&amp;quot;&lt;&#x2F;span&gt;&lt;span style=&quot;color:#c3e88d;&quot;&gt;couldn&amp;#39;t create a layout&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;&amp;quot;);
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F; Do the alloc.
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;let&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt; ptr &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;= &lt;&#x2F;span&gt;&lt;span style=&quot;color:#c792ea;&quot;&gt;unsafe &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;{ &lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;alloc&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;layout&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;) };
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F; Return the pointer.
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;    ptr
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;}
+
+&lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F;&#x2F; Export a &#96;greet&#96; function from Rust to JavaScript that takes
+&#x2F;&#x2F;&#x2F; a string and alerts &amp;quot;Hello {name}!&amp;quot;.
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;#[&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;no_mangle&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;]
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#c792ea;&quot;&gt;pub extern &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;fn &lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;greet&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#f78c6c;&quot;&gt;name_ptr&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;: &lt;&#x2F;span&gt;&lt;span style=&quot;color:#c792ea;&quot;&gt;*mut &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;u8&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;, &lt;&#x2F;span&gt;&lt;span style=&quot;color:#f78c6c;&quot;&gt;len&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;: &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;u8&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;) {
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F; Create a string around the raw name passed from javascript.
+    &#x2F;&#x2F; Note that from_raw_parts takes ownership, ensuring the string will get dropped.
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;let&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt; name &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;= &lt;&#x2F;span&gt;&lt;span style=&quot;color:#c792ea;&quot;&gt;unsafe &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;{ &lt;&#x2F;span&gt;&lt;span style=&quot;color:#ffcb6b;&quot;&gt;String&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;::&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;from_raw_parts&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;name_ptr&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt; len &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;as &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;usize&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;,&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt; len &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;as &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;usize&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;) };
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F; Create our message.
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;let&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt; message &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;= &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;format!&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&amp;quot;&lt;&#x2F;span&gt;&lt;span style=&quot;color:#c3e88d;&quot;&gt;Hello &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;{}&lt;&#x2F;span&gt;&lt;span style=&quot;color:#c3e88d;&quot;&gt;!&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;&amp;quot;,&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt; name&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;);
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F;Call alert.
+    &lt;&#x2F;span&gt;&lt;span style=&quot;color:#c792ea;&quot;&gt;unsafe &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;{
+        &lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;alert&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;message&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;as_ptr&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(),&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt; message&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;len&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;());
+    }
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F; The strings gets dropped here, and the memory cleaned up.
+&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;}
+&lt;&#x2F;span&gt;&lt;&#x2F;pre&gt;
+&lt;blockquote&gt;
+&lt;p&gt;We&#x27;re allocating memory using &lt;code&gt;alloc&lt;&#x2F;code&gt; because, at the time of writing, the &lt;code&gt;Alloc&lt;&#x2F;code&gt; trait has not yet been stabilized.&lt;&#x2F;p&gt;
+&lt;&#x2F;blockquote&gt;
+&lt;p&gt;The &lt;code&gt;do_alloc&lt;&#x2F;code&gt; function will allocate a given number of bytes in WASM&#x27;s memory and return the index 
+to the caller.  We&#x27;ve also modified &lt;code&gt;greet&lt;&#x2F;code&gt; to accept a pointer and length to use to create a &lt;code&gt;String&lt;&#x2F;code&gt;, format the message,
+and call &lt;code&gt;alert&lt;&#x2F;code&gt; as before.&lt;&#x2F;p&gt;
+&lt;p&gt;We can wire this up with JavaScript like so:&lt;&#x2F;p&gt;
+&lt;pre style=&quot;background-color:#212121;&quot;&gt;
+&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F; part1-custom-alert&#x2F;public&#x2F;load_wasm.js
+    &#x2F;&#x2F; ...
+
+    &#x2F;&#x2F; Passes the string to our wasm module and
+    &#x2F;&#x2F; calls the exported greet function.
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;function &lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;call_greet&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#f78c6c;&quot;&gt;name&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;) {
+        &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F; Encode the string as bytes.
+        &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;let &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;encoder &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;= new &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;TextEncoder&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&amp;#39;&lt;&#x2F;span&gt;&lt;span style=&quot;color:#c3e88d;&quot;&gt;utf-8&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;&amp;#39;)
+        &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;let &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;encoded &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;= &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;encoder&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;encode&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;name&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;);
+
+        &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F; Allocate some memory for our wasm module and set
+        &#x2F;&#x2F; it to the encoded string.
+        &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;let &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;ptr &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;= &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;wasm&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;do_alloc&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;encoded&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;length&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;);
+        &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#c792ea;&quot;&gt;let &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;mem &lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;= new &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;Uint8Array&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;wasm&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;memory&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;buffer&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;, &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;ptr&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;);
+        &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;mem&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;set&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;encoded&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;);
+
+        &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F; Call greet with the pointer and length.
+        &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;wasm&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;greet&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;ptr&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;, &lt;&#x2F;span&gt;&lt;span style=&quot;color:#eeffff;&quot;&gt;encoded&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;.&lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;length&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;);
+    }
+
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F; ...
+
+    &#x2F;&#x2F; replace wasm.greet() with:
+        &lt;&#x2F;span&gt;&lt;span style=&quot;color:#82aaff;&quot;&gt;call_greet&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;(&amp;quot;&lt;&#x2F;span&gt;&lt;span style=&quot;color:#c3e88d;&quot;&gt;nerd&lt;&#x2F;span&gt;&lt;span style=&quot;color:#89ddff;&quot;&gt;&amp;quot;);
+
+    &lt;&#x2F;span&gt;&lt;span style=&quot;font-style:italic;color:#4a4a4a;&quot;&gt;&#x2F;&#x2F; ...
+&lt;&#x2F;span&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Runing the new code, we get:&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;img src=&quot;&#x2F;bottoms-up-wasm&#x2F;custom-alert.png&quot; alt=&quot;custom-alert&quot; &#x2F;&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;It works!&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;in-conclusion&quot;&gt;In Conclusion&lt;&#x2F;h2&gt;
+&lt;p&gt;We&#x27;ve seen how we can work across the WASM&#x2F;JavaScript boundary to get things done, but there
+are some obvious issues with this approach:&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;We have to manage a lot memory ourselves.&lt;&#x2F;li&gt;
+&lt;li&gt;There&#x27;s unsafe code all over the place.&lt;&#x2F;li&gt;
+&lt;li&gt;There&#x27;s a &lt;em&gt;lot&lt;&#x2F;em&gt; of error-prone boilerplate dedicated to moving values across the boundary.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;Thankfully, this is where the excellent &lt;code&gt;wasm-bindgen&lt;&#x2F;code&gt; comes in to help out.  &lt;code&gt;wasm-bindgen&lt;&#x2F;code&gt; will
+generate code at compile time for us that takes care of everything we did manually here, and allows
+us to write Rust without comprimising the abstractions it gives us over memory management and lifetimes.&lt;&#x2F;p&gt;
+&lt;p&gt;In the next installment of this guide, we&#x27;ll layer in &lt;code&gt;wasm-bindgen&lt;&#x2F;code&gt; and &lt;code&gt;web-sys&lt;&#x2F;code&gt;, which serves to give
+an abstraction over dealing with native JavaScript objects.  It&#x27;ll be a hoot, so check back soon!&lt;&#x2F;p&gt;
+&lt;p&gt;If you&#x27;re hungry for a more complex example of what we&#x27;ve been through today, the &lt;a href=&quot;https:&#x2F;&#x2F;github.com&#x2F;spennydl&#x2F;wasm-tutorial-examples&#x2F;&quot;&gt;example repository&lt;&#x2F;a&gt; 
+for this post contains an extra project that computes a julia set and draws it directly from WASM&#x27;s memory
+to an HTML canvas.  Take a look if you&#x27;re interested!&lt;&#x2F;p&gt;
+&lt;p&gt;Thanks for reading!&lt;&#x2F;p&gt;
+</description>
+            </item>
+        
+    </channel>
+</rss>
